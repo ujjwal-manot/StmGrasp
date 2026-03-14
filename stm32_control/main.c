@@ -45,8 +45,6 @@ osMutexId_t         servoMutex;
 osMutexId_t         depthMutex;
 osMutexId_t         stateMutex;
 osMutexId_t         imuMutex;
-osMessageQueueId_t  cmdQueue;
-
 volatile SystemState_t  g_systemState;
 volatile ServoState_t   g_servoState;
 volatile DepthGrid_t    g_depthGrid;

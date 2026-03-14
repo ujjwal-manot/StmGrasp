@@ -260,7 +260,6 @@ extern IWDG_HandleTypeDef  hiwdg;
 extern osMutexId_t         servoMutex;
 extern osMutexId_t         depthMutex;   /* Also used as I2C1 bus mutex */
 extern osMutexId_t         stateMutex;
-extern osMessageQueueId_t  cmdQueue;
 
 extern volatile SystemState_t  g_systemState;
 extern volatile ServoState_t   g_servoState;

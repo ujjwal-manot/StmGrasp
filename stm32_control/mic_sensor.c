@@ -226,7 +226,6 @@ void micDmaHalfCpltCallback(void)
 
                 /* Copy remaining samples from this half-buffer */
                 uint16_t remaining = (MIC_BUFFER_SIZE / 2) - i;
-                if (remaining > MIC_BUFFER_SIZE) remaining = MIC_BUFFER_SIZE;
                 memcpy(s_capture.samples, &s_dmaBuffer[i], remaining * sizeof(uint16_t));
                 s_captureIndex = remaining;
                 return;
@@ -269,7 +268,6 @@ void micDmaCpltCallback(void)
                 s_captureIndex = 0;
 
                 uint16_t remaining = MIC_BUFFER_SIZE - i;
-                if (remaining > MIC_BUFFER_SIZE) remaining = MIC_BUFFER_SIZE;
                 memcpy(s_capture.samples, &s_dmaBuffer[i], remaining * sizeof(uint16_t));
                 s_captureIndex = remaining;
                 return;
