@@ -93,11 +93,16 @@ void uartRxIrqHandler(void)
     HAL_UART_Receive_IT(&huart2, &s_rxByte, 1);
 }
 
-/* HAL callback - wired to our handler */
+/* HAL callback - wired to our handler.
+ * Dispatches to both ESP32 UART and BLE UART handlers. */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
     if (huart->Instance == ESP32_UART_INSTANCE) {
         uartRxIrqHandler();
+    } else if (huart->Instance == USART3) {
+        /* BLE module UART - declared in ble_comm.h */
+        extern void bleRxIrqHandler(void);
+        bleRxIrqHandler();
     }
 }
 

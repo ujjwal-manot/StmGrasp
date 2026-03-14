@@ -3,22 +3,33 @@
  * Target: STEVAL-ROBKIT1 (STM32H725IGT6)
  *
  * FreeRTOS tasks:
- *   SafetyTask   (priority 4 - highest) - Watchdog, force limits, E-STOP
- *   CommandTask  (priority 3)           - Parse UART commands from ESP32
- *   ServoTask    (priority 2)           - Smooth servo interpolation
- *   DepthTask    (priority 1 - lowest)  - VL53L8CX 5Hz depth reads
+ *   SafetyTask   (priority 7 - highest) - Watchdog, force limits, E-STOP
+ *   CommandTask  (priority 6)           - Parse UART commands from ESP32
+ *   ServoTask    (priority 5)           - Smooth servo interpolation
+ *   IMUTask      (priority 4)           - LSM6DSV16BX 50Hz IMU reads
+ *   MotorTask    (priority 3)           - Motor control and encoder readback
+ *   BLETask      (priority 2)           - BLE communication with mobile app
+ *   DepthTask    (priority 1)           - VL53L8CX 5Hz depth reads
+ *   ScannerTask  (priority 0 - lowest)  - 3D scanning (photometric stereo + ToF fusion)
  *
  * Peripheral mapping:
  *   USART2 (PD5/PD6)  - ESP32 communication, 115200 baud
+ *   USART3 (PD8/PD9)  - BLE module communication, 115200 baud
  *   TIM3 (PC6-PC9)    - 4-channel servo PWM, 50Hz
- *   I2C1 (PB8/PB9)    - VL53L8CX ToF sensor
+ *   I2C1 (PB8/PB9)    - VL53L8CX ToF + LSM6DSV16BX IMU + motor board (shared bus)
+ *   ADC3 (PF3)        - Analog microphone input (8kHz via TIM6 trigger)
  *   IWDG              - 2-second independent watchdog
  */
 
 #include "main.h"
 #include "servo_control.h"
 #include "depth_sensor.h"
+#include "imu_sensor.h"
+#include "mic_sensor.h"
+#include "motor_control.h"
+#include "ble_comm.h"
 #include "uart_protocol.h"
+#include "scanner_3d.h"
 #include "safety.h"
 
 /* ========================================================================== */
@@ -33,17 +44,26 @@ IWDG_HandleTypeDef  hiwdg;
 osMutexId_t         servoMutex;
 osMutexId_t         depthMutex;
 osMutexId_t         stateMutex;
+osMutexId_t         imuMutex;
 osMessageQueueId_t  cmdQueue;
 
 volatile SystemState_t  g_systemState;
 volatile ServoState_t   g_servoState;
 volatile DepthGrid_t    g_depthGrid;
+volatile IMUData_t      g_imuData;
+volatile MicCapture_t   g_micCapture;
+volatile MotorState_t   g_motorState;
+volatile BLEState_t     g_bleState;
 
 /* Task handles */
 static osThreadId_t s_commandTaskHandle;
 static osThreadId_t s_servoTaskHandle;
 static osThreadId_t s_depthTaskHandle;
 static osThreadId_t s_safetyTaskHandle;
+static osThreadId_t s_imuTaskHandle;
+static osThreadId_t s_motorTaskHandle;
+static osThreadId_t s_bleTaskHandle;
+static osThreadId_t s_scannerTaskHandle;
 
 /* ========================================================================== */
 /*                       PERIPHERAL INITIALIZATION                             */
@@ -370,6 +390,202 @@ void CommandTask(void *argument)
                 break;
             }
 
+            case CMD_REQUEST_IMU: {
+                /* Read latest IMU data and send to ESP32 */
+                IMUData_t local_imu;
+                osMutexAcquire(imuMutex, osWaitForever);
+                memcpy(&local_imu, (const void *)&g_imuData, sizeof(IMUData_t));
+                osMutexRelease(imuMutex);
+
+                if (local_imu.valid) {
+                    /* Pack IMU data: accel(3x int16 x10), gyro(3x int16 x10),
+                     * pitch(int16 x10), roll(int16 x10), arm_tilt(int16 x10) = 18 bytes */
+                    uint8_t payload[18];
+                    int16_t ax = (int16_t)(local_imu.accel_x * 10.0f);
+                    int16_t ay = (int16_t)(local_imu.accel_y * 10.0f);
+                    int16_t az = (int16_t)(local_imu.accel_z * 10.0f);
+                    int16_t gx = (int16_t)(local_imu.gyro_x * 10.0f);
+                    int16_t gy = (int16_t)(local_imu.gyro_y * 10.0f);
+                    int16_t gz = (int16_t)(local_imu.gyro_z * 10.0f);
+                    int16_t pitch = (int16_t)(local_imu.pitch * 10.0f);
+                    int16_t roll  = (int16_t)(local_imu.roll * 10.0f);
+                    int16_t tilt  = (int16_t)(local_imu.arm_tilt * 10.0f);
+
+                    payload[0]  = (uint8_t)(ax >> 8);
+                    payload[1]  = (uint8_t)(ax & 0xFF);
+                    payload[2]  = (uint8_t)(ay >> 8);
+                    payload[3]  = (uint8_t)(ay & 0xFF);
+                    payload[4]  = (uint8_t)(az >> 8);
+                    payload[5]  = (uint8_t)(az & 0xFF);
+                    payload[6]  = (uint8_t)(gx >> 8);
+                    payload[7]  = (uint8_t)(gx & 0xFF);
+                    payload[8]  = (uint8_t)(gy >> 8);
+                    payload[9]  = (uint8_t)(gy & 0xFF);
+                    payload[10] = (uint8_t)(gz >> 8);
+                    payload[11] = (uint8_t)(gz & 0xFF);
+                    payload[12] = (uint8_t)(pitch >> 8);
+                    payload[13] = (uint8_t)(pitch & 0xFF);
+                    payload[14] = (uint8_t)(roll >> 8);
+                    payload[15] = (uint8_t)(roll & 0xFF);
+                    payload[16] = (uint8_t)(tilt >> 8);
+                    payload[17] = (uint8_t)(tilt & 0xFF);
+
+                    sendResponse(RSP_IMU_DATA, payload, 18);
+                } else {
+                    sendError(ERR_SENSOR_FAULT);
+                }
+                break;
+            }
+
+            case CMD_TRIGGER_MIC_CAPTURE: {
+                /* Trigger microphone capture, then wait for completion and run FFT */
+                triggerTapCapture();
+                sendAck(CMD_TRIGGER_MIC_CAPTURE);
+
+                /* Wait up to 500ms for capture to complete */
+                uint32_t wait_start = HAL_GetTick();
+                while (!isCaptureComplete() && (HAL_GetTick() - wait_start) < 500) {
+                    osDelay(5);
+                }
+
+                if (isCaptureComplete()) {
+                    /* Run FFT analysis on captured data */
+                    MicCapture_t local_mic;
+                    uint16_t count = 0;
+                    uint16_t *buf = getTapBuffer(&count);
+
+                    if (buf != NULL && count > 0) {
+                        memcpy(local_mic.samples, buf, count * sizeof(uint16_t));
+                        local_mic.sample_count = count;
+                        local_mic.sample_rate = MIC_SAMPLE_RATE_HZ;
+                        local_mic.capture_complete = true;
+
+                        computeBasicFFT(&local_mic);
+
+                        /* Pack result: dominant_freq(uint16), centroid(uint16), decay_ratio(uint16 x1000) = 6 bytes */
+                        uint8_t payload[6];
+                        uint16_t freq = (uint16_t)local_mic.dominant_freq_hz;
+                        uint16_t centroid = (uint16_t)local_mic.spectral_centroid_hz;
+                        uint16_t decay = (uint16_t)(local_mic.decay_ratio * 1000.0f);
+
+                        payload[0] = (uint8_t)(freq >> 8);
+                        payload[1] = (uint8_t)(freq & 0xFF);
+                        payload[2] = (uint8_t)(centroid >> 8);
+                        payload[3] = (uint8_t)(centroid & 0xFF);
+                        payload[4] = (uint8_t)(decay >> 8);
+                        payload[5] = (uint8_t)(decay & 0xFF);
+
+                        sendResponse(RSP_TAP_RESULT, payload, 6);
+                    } else {
+                        sendError(ERR_SENSOR_FAULT);
+                    }
+                } else {
+                    sendError(ERR_SENSOR_FAULT);
+                }
+                break;
+            }
+
+            case CMD_MOTOR_MOVE: {
+                /* Payload: [left_speed_hi(1)] [left_speed_lo(1)] [right_speed_hi(1)] [right_speed_lo(1)] */
+                if (pkt.payload_len >= 4) {
+                    int16_t left  = (int16_t)(((uint16_t)pkt.payload[0] << 8) | pkt.payload[1]);
+                    int16_t right = (int16_t)(((uint16_t)pkt.payload[2] << 8) | pkt.payload[3]);
+                    HAL_StatusTypeDef mret = enableMotors();
+                    if (mret == HAL_OK) {
+                        mret = sendMotorCommand(left, right);
+                    }
+                    if (mret == HAL_OK) {
+                        sendAck(CMD_MOTOR_MOVE);
+                    } else {
+                        sendError(ERR_I2C_FAILURE);
+                    }
+                }
+                break;
+            }
+
+            case CMD_MOTOR_STOP: {
+                HAL_StatusTypeDef mret = stopMotors();
+                if (mret == HAL_OK) {
+                    disableMotors();
+                    sendAck(CMD_MOTOR_STOP);
+                } else {
+                    sendError(ERR_I2C_FAILURE);
+                }
+                break;
+            }
+
+            case CMD_APPROACH_OBJECT: {
+                /* Payload: [target_dist_hi(1)] [target_dist_lo(1)] */
+                if (pkt.payload_len >= 2) {
+                    uint16_t target = ((uint16_t)pkt.payload[0] << 8) | pkt.payload[1];
+                    sendAck(CMD_APPROACH_OBJECT);
+                    HAL_StatusTypeDef mret = approachObject(target);
+                    if (mret == HAL_OK) {
+                        /* Send encoder data after approach completes */
+                        osMutexAcquire(stateMutex, osWaitForever);
+                        int32_t enc_l = g_motorState.encoder_left;
+                        int32_t enc_r = g_motorState.encoder_right;
+                        float dist = g_motorState.distance_mm;
+                        osMutexRelease(stateMutex);
+
+                        uint8_t enc_payload[12];
+                        enc_payload[0]  = (uint8_t)((uint32_t)enc_l >> 24);
+                        enc_payload[1]  = (uint8_t)((uint32_t)enc_l >> 16);
+                        enc_payload[2]  = (uint8_t)((uint32_t)enc_l >> 8);
+                        enc_payload[3]  = (uint8_t)((uint32_t)enc_l & 0xFF);
+                        enc_payload[4]  = (uint8_t)((uint32_t)enc_r >> 24);
+                        enc_payload[5]  = (uint8_t)((uint32_t)enc_r >> 16);
+                        enc_payload[6]  = (uint8_t)((uint32_t)enc_r >> 8);
+                        enc_payload[7]  = (uint8_t)((uint32_t)enc_r & 0xFF);
+                        uint32_t dist_x10 = (uint32_t)(dist * 10.0f);
+                        enc_payload[8]  = (uint8_t)(dist_x10 >> 24);
+                        enc_payload[9]  = (uint8_t)(dist_x10 >> 16);
+                        enc_payload[10] = (uint8_t)(dist_x10 >> 8);
+                        enc_payload[11] = (uint8_t)(dist_x10 & 0xFF);
+                        sendResponse(RSP_ENCODER_DATA, enc_payload, 12);
+                    } else {
+                        sendError(ERR_I2C_FAILURE);
+                    }
+                }
+                break;
+            }
+
+            case CMD_START_FULL_SCAN: {
+                HAL_StatusTypeDef sret = startFullScan();
+                if (sret == HAL_OK) {
+                    sendAck(CMD_START_FULL_SCAN);
+                } else if (sret == HAL_BUSY) {
+                    sendError(ERR_SENSOR_FAULT); /* Scan already in progress */
+                } else {
+                    sendError(ERR_SENSOR_FAULT);
+                }
+                break;
+            }
+
+            case CMD_START_QUICK_SCAN: {
+                HAL_StatusTypeDef sret = startQuickScan();
+                if (sret == HAL_OK) {
+                    sendAck(CMD_START_QUICK_SCAN);
+                } else {
+                    sendError(ERR_SENSOR_FAULT);
+                }
+                break;
+            }
+
+            case CMD_GET_SCAN_STATUS:
+                sendScanStatus();
+                break;
+
+            case CMD_GET_SCAN_RESULT: {
+                ScanResult_t *scan = getScanResult();
+                if (scan->complete) {
+                    sendScanResult(scan);
+                } else {
+                    sendError(ERR_SENSOR_FAULT);
+                }
+                break;
+            }
+
             default:
                 sendError(ERR_INVALID_CMD);
                 break;
@@ -402,8 +618,10 @@ void DepthTask(void *argument)
 {
     (void)argument;
 
-    /* Initialize the ToF sensor */
+    /* Initialize the ToF sensor (hold depthMutex to prevent I2C bus collision with IMUTask) */
+    osMutexAcquire(depthMutex, osWaitForever);
     HAL_StatusTypeDef ret = initVL53L8CX();
+    osMutexRelease(depthMutex);
     if (ret == HAL_OK) {
         osMutexAcquire(stateMutex, osWaitForever);
         g_systemState.system_status |= STATUS_TOF_OK;
@@ -417,16 +635,18 @@ void DepthTask(void *argument)
     for (;;) {
         DepthGrid_t local_grid;
 
+        /* Acquire depthMutex for the entire I2C + data copy operation.
+         * This mutex also protects I2C1 bus access shared with IMUTask. */
         osMutexAcquire(depthMutex, osWaitForever);
         memcpy(&local_grid, (const void *)&g_depthGrid, sizeof(DepthGrid_t));
-        osMutexRelease(depthMutex);
-
         ret = readDepthGrid(&local_grid);
 
         if (ret == HAL_OK && local_grid.valid) {
-            osMutexAcquire(depthMutex, osWaitForever);
             memcpy((void *)&g_depthGrid, &local_grid, sizeof(DepthGrid_t));
-            osMutexRelease(depthMutex);
+        }
+        osMutexRelease(depthMutex);
+
+        if (ret == HAL_OK && local_grid.valid) {
 
             forwardDepthData(&local_grid);
 
@@ -444,8 +664,133 @@ void DepthTask(void *argument)
 }
 
 /**
+ * IMUTask: Read LSM6DSV16BX at 50Hz and store in global IMU data.
+ * Priority 2. Reads accelerometer + gyroscope, computes orientation.
+ */
+void IMUTask(void *argument)
+{
+    (void)argument;
+
+    /* Initialize the IMU sensor */
+    HAL_StatusTypeDef ret = initIMU();
+    if (ret == HAL_OK) {
+        osMutexAcquire(stateMutex, osWaitForever);
+        g_systemState.system_status |= STATUS_IMU_OK;
+        osMutexRelease(stateMutex);
+    } else {
+        osMutexAcquire(stateMutex, osWaitForever);
+        g_systemState.system_status &= ~STATUS_IMU_OK;
+        osMutexRelease(stateMutex);
+    }
+
+    for (;;) {
+        IMUData_t local_imu;
+
+        osMutexAcquire(imuMutex, osWaitForever);
+        memcpy(&local_imu, (const void *)&g_imuData, sizeof(IMUData_t));
+        osMutexRelease(imuMutex);
+
+        ret = readIMU(&local_imu);
+
+        if (ret == HAL_OK && local_imu.valid) {
+            osMutexAcquire(imuMutex, osWaitForever);
+            memcpy((void *)&g_imuData, &local_imu, sizeof(IMUData_t));
+            osMutexRelease(imuMutex);
+
+            osMutexAcquire(stateMutex, osWaitForever);
+            g_systemState.system_status |= STATUS_IMU_OK;
+            osMutexRelease(stateMutex);
+        } else if (ret != HAL_OK) {
+            osMutexAcquire(stateMutex, osWaitForever);
+            g_systemState.system_status &= ~STATUS_IMU_OK;
+            osMutexRelease(stateMutex);
+        }
+
+        osDelay(IMU_READ_PERIOD_MS);
+    }
+}
+
+/**
+ * MotorTask: Periodic encoder readback and motor status updates.
+ * Priority 3. Reads encoder data from the motor board via I2C at
+ * ENCODER_SAMPLE_PERIOD_MS intervals.
+ */
+void MotorTask(void *argument)
+{
+    (void)argument;
+
+    /* Initialize motor subsystem (probe motor board on I2C1) */
+    HAL_StatusTypeDef ret = initMotors();
+    if (ret == HAL_OK) {
+        osMutexAcquire(stateMutex, osWaitForever);
+        g_systemState.system_status |= STATUS_MOTORS_OK;
+        osMutexRelease(stateMutex);
+    } else {
+        osMutexAcquire(stateMutex, osWaitForever);
+        g_systemState.system_status &= ~STATUS_MOTORS_OK;
+        osMutexRelease(stateMutex);
+    }
+
+    for (;;) {
+        motorTaskProcess();
+
+        /* Periodically send motor status to ESP32 */
+        osMutexAcquire(stateMutex, osWaitForever);
+        bool motor_enabled = g_motorState.enabled;
+        int16_t left_spd   = g_motorState.speed_left;
+        int16_t right_spd  = g_motorState.speed_right;
+        osMutexRelease(stateMutex);
+
+        /* Only send status if motors are active */
+        if (motor_enabled && (left_spd != 0 || right_spd != 0)) {
+            uint8_t status_payload[5];
+            status_payload[0] = (uint8_t)((uint16_t)left_spd >> 8);
+            status_payload[1] = (uint8_t)((uint16_t)left_spd & 0xFF);
+            status_payload[2] = (uint8_t)((uint16_t)right_spd >> 8);
+            status_payload[3] = (uint8_t)((uint16_t)right_spd & 0xFF);
+            status_payload[4] = motor_enabled ? 0x01 : 0x00;
+            sendResponse(RSP_MOTOR_STATUS, status_payload, 5);
+        }
+
+        osDelay(ENCODER_SAMPLE_PERIOD_MS);
+    }
+}
+
+/**
+ * BLETask: Handle BLE communication with mobile app.
+ * Priority 2. Processes incoming BLE commands and sends periodic
+ * status notifications to the connected phone.
+ */
+void BLETask(void *argument)
+{
+    (void)argument;
+
+    /* Initialize BLE module */
+    HAL_StatusTypeDef ret = initBLE();
+    if (ret != HAL_OK) {
+        /* BLE init failed. System continues without BLE.
+         * Retry periodically in the task loop. */
+    }
+
+    for (;;) {
+        bleTaskProcess();
+        osDelay(10); /* 100 Hz BLE processing */
+    }
+}
+
+/**
+ * ScannerTask: 3D scanning via photometric stereo + ToF depth fusion.
+ * Priority below DepthTask. Runs the scanner state machine.
+ * Stack needs 4KB for float-heavy normal map computation and point cloud.
+ */
+void ScannerTask(void *argument)
+{
+    scannerTask(argument);
+}
+
+/**
  * SafetyTask: Watchdog refresh, safety limit checks, E-STOP monitoring.
- * Priority 4 (highest). Must never be starved.
+ * Priority 7 (highest). Must never be starved.
  */
 void SafetyTask(void *argument)
 {
@@ -488,8 +833,9 @@ int main(void)
     servoMutex = osMutexNew(&mutexAttr);
     depthMutex = osMutexNew(&mutexAttr);
     stateMutex = osMutexNew(&mutexAttr);
+    imuMutex   = osMutexNew(&mutexAttr);
 
-    if (servoMutex == NULL || depthMutex == NULL || stateMutex == NULL) {
+    if (servoMutex == NULL || depthMutex == NULL || stateMutex == NULL || imuMutex == NULL) {
         Error_Handler();
     }
 
@@ -498,40 +844,77 @@ int main(void)
     initServos();
     initSafety();
 
+    /* Initialize microphone (ADC3 + DMA + TIM6).
+     * IMU init happens in IMUTask to share depthMutex safely after RTOS starts. */
+    HAL_StatusTypeDef mic_ret = initMicrophone();
+    if (mic_ret == HAL_OK) {
+        g_systemState.system_status |= STATUS_MIC_OK;
+    }
+
     /* Initialize watchdog last (after all init is done to avoid premature reset) */
     MX_IWDG_Init();
 
-    /* Create FreeRTOS tasks */
+    /* Create FreeRTOS tasks (priority 7 = highest, 1 = lowest) */
     const osThreadAttr_t safetyTaskAttr = {
         .name = "SafetyTask",
         .stack_size = 512,
-        .priority = (osPriority_t) osPriorityAboveNormal3,
+        .priority = (osPriority_t) osPriorityRealtime,
     };
     s_safetyTaskHandle = osThreadNew(SafetyTask, NULL, &safetyTaskAttr);
 
     const osThreadAttr_t commandTaskAttr = {
         .name = "CommandTask",
         .stack_size = 1024,
-        .priority = (osPriority_t) osPriorityAboveNormal2,
+        .priority = (osPriority_t) osPriorityAboveNormal3,
     };
     s_commandTaskHandle = osThreadNew(CommandTask, NULL, &commandTaskAttr);
 
     const osThreadAttr_t servoTaskAttr = {
         .name = "ServoTask",
         .stack_size = 512,
-        .priority = (osPriority_t) osPriorityAboveNormal1,
+        .priority = (osPriority_t) osPriorityAboveNormal2,
     };
     s_servoTaskHandle = osThreadNew(ServoTask, NULL, &servoTaskAttr);
+
+    const osThreadAttr_t imuTaskAttr = {
+        .name = "IMUTask",
+        .stack_size = 1024,  /* Stack for float orientation math */
+        .priority = (osPriority_t) osPriorityAboveNormal1,
+    };
+    s_imuTaskHandle = osThreadNew(IMUTask, NULL, &imuTaskAttr);
+
+    const osThreadAttr_t motorTaskAttr = {
+        .name = "MotorTask",
+        .stack_size = 1024,  /* Stack for motor control + approach logic */
+        .priority = (osPriority_t) osPriorityAboveNormal,
+    };
+    s_motorTaskHandle = osThreadNew(MotorTask, NULL, &motorTaskAttr);
+
+    const osThreadAttr_t bleTaskAttr = {
+        .name = "BLETask",
+        .stack_size = 1024,  /* Stack for BLE AT commands + data processing */
+        .priority = (osPriority_t) osPriorityNormal1,
+    };
+    s_bleTaskHandle = osThreadNew(BLETask, NULL, &bleTaskAttr);
 
     const osThreadAttr_t depthTaskAttr = {
         .name = "DepthTask",
         .stack_size = 2048,  /* Larger stack for depth buffer processing */
-        .priority = (osPriority_t) osPriorityAboveNormal,
+        .priority = (osPriority_t) osPriorityNormal,
     };
     s_depthTaskHandle = osThreadNew(DepthTask, NULL, &depthTaskAttr);
 
-    if (s_safetyTaskHandle == NULL || s_commandTaskHandle == NULL ||
-        s_servoTaskHandle == NULL  || s_depthTaskHandle == NULL) {
+    const osThreadAttr_t scannerTaskAttr = {
+        .name = "ScannerTask",
+        .stack_size = 4096,  /* Large stack for float-heavy 3D math + point cloud */
+        .priority = (osPriority_t) osPriorityBelowNormal,
+    };
+    s_scannerTaskHandle = osThreadNew(ScannerTask, NULL, &scannerTaskAttr);
+
+    if (s_safetyTaskHandle  == NULL || s_commandTaskHandle == NULL ||
+        s_servoTaskHandle   == NULL || s_depthTaskHandle   == NULL ||
+        s_imuTaskHandle     == NULL || s_motorTaskHandle   == NULL ||
+        s_bleTaskHandle     == NULL || s_scannerTaskHandle == NULL) {
         Error_Handler();
     }
 

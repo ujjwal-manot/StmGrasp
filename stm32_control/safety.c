@@ -8,6 +8,7 @@
 
 #include "safety.h"
 #include "servo_control.h"
+#include "motor_control.h"
 #include "uart_protocol.h"
 
 /* -------------------------------------------------------------------------- */
@@ -109,8 +110,8 @@ void checkSafetyLimits(void)
     if (!trigger_estop) {
         status |= STATUS_SAFETY_OK;
     }
-    /* Preserve STATUS_TOF_OK from DepthTask */
-    status |= (g_systemState.system_status & STATUS_TOF_OK);
+    /* Preserve sensor/subsystem status bits managed by their respective tasks */
+    status |= (g_systemState.system_status & (STATUS_TOF_OK | STATUS_IMU_OK | STATUS_MIC_OK | STATUS_MOTORS_OK));
     g_systemState.system_status = status;
     osMutexRelease(stateMutex);
 
@@ -135,6 +136,10 @@ void emergencyStop(void)
 {
     /* Disable all servo PWM outputs */
     disableAllServos();
+
+    /* Stop and disable motors (best-effort, ignore I2C errors during E-STOP) */
+    stopMotors();
+    disableMotors();
 
     /* Open gripper via direct register write (bypass smooth move) */
     uint32_t ccr_open = angleToCCR((float)GRIPPER_OPEN_ANGLE);

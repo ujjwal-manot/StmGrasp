@@ -2,6 +2,7 @@
  * STM32H725 Gripper Controller - Main Header
  * Target: STEVAL-ROBKIT1 (STM32H725IGT6)
  * Firmware for servo/gripper control, VL53L8CX depth sensing,
+ * LSM6DSV16BX IMU, microphone tap analysis,
  * PID force control, and UART communication with ESP32.
  */
 
@@ -126,6 +127,15 @@ extern "C" {
 #define CMD_EMERGENCY_STOP        0x0BU
 #define CMD_SET_SERVO_SPEED       0x0CU
 #define CMD_FORCE_UPDATE          0x0DU  /* ESP32 sending force sensor reading */
+#define CMD_REQUEST_IMU           0x0EU  /* Request IMU orientation data */
+#define CMD_TRIGGER_MIC_CAPTURE   0x0FU  /* Trigger microphone tap capture */
+#define CMD_MOTOR_MOVE            0x10U  /* Motor move: [left_hi][left_lo][right_hi][right_lo] */
+#define CMD_MOTOR_STOP            0x11U  /* Stop both motors immediately */
+#define CMD_APPROACH_OBJECT       0x12U  /* Approach nearest object: [target_dist_hi][target_dist_lo] */
+#define CMD_START_FULL_SCAN       0x20U  /* Begin 360-degree 3D scan */
+#define CMD_START_QUICK_SCAN      0x21U  /* Single-position quick scan (no rotation) */
+#define CMD_GET_SCAN_STATUS       0x22U  /* Query scanner state and progress */
+#define CMD_GET_SCAN_RESULT       0x23U  /* Request completed scan result */
 
 /* Response IDs (STM32 -> ESP32) */
 #define RSP_ACK                   0x80U
@@ -134,6 +144,12 @@ extern "C" {
 #define RSP_STATUS                0x83U
 #define RSP_ERROR                 0x84U
 #define RSP_DEPTH_OBJECT          0x85U
+#define RSP_IMU_DATA              0x86U
+#define RSP_TAP_RESULT            0x87U
+#define RSP_MOTOR_STATUS          0x88U  /* Motor status: [left_speed][right_speed][enabled] */
+#define RSP_ENCODER_DATA          0x89U  /* Encoder data: [left_enc(4)][right_enc(4)][distance(4)] */
+#define RSP_SCAN_STATUS           0x90U  /* Scanner state + progress */
+#define RSP_SCAN_RESULT           0x91U  /* 3D scan result (points, bbox, edges) */
 
 /* Error codes */
 #define ERR_NONE                  0x00U
@@ -204,11 +220,31 @@ typedef struct {
     uint8_t  system_status;    /* Bitfield: bit0=servos_ok, bit1=tof_ok, bit2=comms_ok, bit3=safety_ok */
 } SystemState_t;
 
+typedef struct {
+    int16_t  speed_left;      /* -100 to 100 percent */
+    int16_t  speed_right;     /* -100 to 100 percent */
+    int32_t  encoder_left;    /* cumulative ticks */
+    int32_t  encoder_right;   /* cumulative ticks */
+    float    distance_mm;     /* estimated distance traveled */
+    bool     enabled;
+} MotorState_t;
+
+typedef struct {
+    bool    initialized;
+    bool    connected;
+    char    device_name[20];
+    uint8_t rx_buffer[64];
+    uint8_t rx_len;
+} BLEState_t;
+
 /* System status bitfield */
 #define STATUS_SERVOS_OK          (1U << 0)
 #define STATUS_TOF_OK             (1U << 1)
 #define STATUS_COMMS_OK           (1U << 2)
 #define STATUS_SAFETY_OK          (1U << 3)
+#define STATUS_IMU_OK             (1U << 4)
+#define STATUS_MIC_OK             (1U << 5)
+#define STATUS_MOTORS_OK          (1U << 6)
 #define STATUS_ESTOP              (1U << 7)
 
 /* ========================================================================== */
@@ -216,18 +252,23 @@ typedef struct {
 /* ========================================================================== */
 
 extern UART_HandleTypeDef  huart2;
+extern UART_HandleTypeDef  huart3;   /* BLE module USART3 */
 extern I2C_HandleTypeDef   hi2c1;
 extern TIM_HandleTypeDef   htim3;
 extern IWDG_HandleTypeDef  hiwdg;
 
 extern osMutexId_t         servoMutex;
-extern osMutexId_t         depthMutex;
+extern osMutexId_t         depthMutex;   /* Also used as I2C1 bus mutex */
 extern osMutexId_t         stateMutex;
 extern osMessageQueueId_t  cmdQueue;
 
 extern volatile SystemState_t  g_systemState;
 extern volatile ServoState_t   g_servoState;
 extern volatile DepthGrid_t    g_depthGrid;
+extern volatile MotorState_t   g_motorState;
+extern volatile BLEState_t     g_bleState;
+
+extern osMutexId_t             imuMutex;
 
 /* ========================================================================== */
 /*                       FUNCTION PROTOTYPES                                   */
@@ -247,6 +288,10 @@ void CommandTask(void *argument);
 void ServoTask(void *argument);
 void DepthTask(void *argument);
 void SafetyTask(void *argument);
+void IMUTask(void *argument);
+void MotorTask(void *argument);
+void BLETask(void *argument);
+void ScannerTask(void *argument);
 
 #ifdef __cplusplus
 }
