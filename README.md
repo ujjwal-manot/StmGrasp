@@ -87,14 +87,25 @@ Multi-modal robotic grasp planning system built on the STEVAL-ROBKIT1. Fuses 10 
 
 ---
 
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [BUILD_GUIDE.md](docs/BUILD_GUIDE.md) | Step-by-step prototype construction: board setup, circuit building, 3D printing, assembly, flashing, testing, troubleshooting |
+| [WIRING_GUIDE.md](docs/WIRING_GUIDE.md) | Complete pin assignments, circuit schematics, power architecture |
+| [HYDRA_GRASP_BLUEPRINT.md](docs/HYDRA_GRASP_BLUEPRINT.md) | Full technical blueprint: sensing theory, algorithms, calibration, demo script, judge Q&A |
+
+---
+
 ## Directory Structure
 
 ```
 StmGrasp/
 ├── README.md
 ├── docs/
+│   ├── BUILD_GUIDE.md            # Step-by-step prototype construction guide
 │   ├── WIRING_GUIDE.md           # Complete pin assignments and circuit diagrams
-│   └── HYDRA_GRASP_BLUEPRINT.md  # Full build guide, demo script, judge Q&A
+│   └── HYDRA_GRASP_BLUEPRINT.md  # Technical blueprint, demo script, judge Q&A
 │
 ├── esp32_brain/                  # ESP32 firmware (Arduino/PlatformIO)
 │   ├── config.h                  # Pin defs, material database, shared structs
