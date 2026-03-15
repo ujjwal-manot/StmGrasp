@@ -29,6 +29,8 @@ static uint32_t g_last_depth_request_ms = 0;
 static bool g_tap_requested = false;
 static bool g_tap_mic_done = false;
 static bool g_tap_imu_done = false;
+static bool g_tap_piezo_done = false;
+static AcousticResult g_piezo_result;
 static float g_current_force_cmd = 0.0f;
 
 static void _handleWebCommand(const char* cmd) {
@@ -168,6 +170,8 @@ static void _updateStateMachine() {
                 g_tap_requested = true;
                 g_tap_mic_done = false;
                 g_tap_imu_done = false;
+                g_tap_piezo_done = false;
+                memset(&g_piezo_result, 0, sizeof(g_piezo_result));
                 break;
 
             case STATE_CLASSIFYING:
@@ -203,6 +207,13 @@ static void _updateStateMachine() {
     switch (g_state) {
         case STATE_TAP_TESTING:
             if (g_tap_requested) {
+                // Local piezo capture (contact vibration)
+                if (!g_tap_piezo_done && waitForTap(50)) {
+                    g_piezo_result = analyzeTapLocal();
+                    g_tap_piezo_done = true;
+                }
+
+                // STM32 onboard mic (airborne sound)
                 if (hasNewMicTap()) {
                     MicTapResult mt = getLatestMicTap();
                     if (mt.valid) {
@@ -214,19 +225,32 @@ static void _updateStateMachine() {
                     }
                     g_tap_mic_done = true;
                 }
+
+                // STM32 IMU (mechanical vibration)
                 if (hasNewIMUTap()) {
                     IMUTapResult it = getLatestIMUTap();
                     if (it.valid && g_acoustic.valid) {
-                        // Fuse IMU vibration with mic data (Knocker approach)
                         g_acoustic.confidence = fminf(g_acoustic.confidence + 0.15f, 1.0f);
-                        // Weight dominant freq toward IMU if IMU has strong signal
-                        if (it.vibration_rms > 0.5f) {
+                        if (it.vibration_rms > 0.5f)
                             g_acoustic.dominant_freq = g_acoustic.dominant_freq * 0.7f + it.dominant_freq * 0.3f;
-                        }
                     }
                     g_tap_imu_done = true;
                 }
-                if (g_tap_mic_done || getStateElapsed() > 2000) {
+
+                // Fuse piezo contact data with airborne mic data (dual-channel)
+                if (g_tap_piezo_done && g_piezo_result.valid) {
+                    if (g_acoustic.valid) {
+                        // Both channels available: weighted average favoring piezo (contact > airborne)
+                        g_acoustic.dominant_freq = g_acoustic.dominant_freq * 0.4f + g_piezo_result.dominant_freq * 0.6f;
+                        g_acoustic.decay_ratio = g_acoustic.decay_ratio * 0.4f + g_piezo_result.decay_ratio * 0.6f;
+                        g_acoustic.confidence = fminf(g_acoustic.confidence + 0.1f, 1.0f);
+                    } else {
+                        // Only piezo available
+                        g_acoustic = g_piezo_result;
+                    }
+                }
+
+                if ((g_tap_mic_done || g_tap_piezo_done) || getStateElapsed() > 2000) {
                     requestStateTransition(STATE_CLASSIFYING);
                 }
             }

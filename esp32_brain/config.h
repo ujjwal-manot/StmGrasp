@@ -25,8 +25,10 @@
 #define PIN_UART_STM32_TX   16   // TX2
 #define PIN_UART_STM32_RX   17   // RX2
 
+// Piezo acoustic tap (contact sensor on gripper finger)
+#define PIN_PIEZO_ADC       33   // ADC1_CH5
+
 // User buttons
-#define PIN_BTN_CALIBRATE   33   // Calibrate / start (was piezo, now freed)
 #define PIN_BTN_START        5   // Manual start (was NodeMCU TX, now freed)
 #define PIN_SPARE_BTN        4
 
