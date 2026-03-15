@@ -22,6 +22,7 @@
  */
 
 #include "main.h"
+#include <math.h>
 #include "servo_control.h"
 #include "depth_sensor.h"
 #include "imu_sensor.h"
@@ -581,6 +582,105 @@ void CommandTask(void *argument)
                 } else {
                     sendError(ERR_SENSOR_FAULT);
                 }
+                break;
+            }
+
+            case CMD_REQUEST_IMU_TAP: {
+                IMUData_t local_imu;
+                osMutexAcquire(imuMutex, osWaitForever);
+                memcpy(&local_imu, (const void *)&g_imuData, sizeof(IMUData_t));
+                osMutexRelease(imuMutex);
+
+                if (!local_imu.valid) {
+                    sendError(ERR_SENSOR_FAULT);
+                    break;
+                }
+
+                triggerTapCapture();
+
+                float ax = local_imu.accel_x;
+                float ay = local_imu.accel_y;
+                float az = local_imu.accel_z;
+                float peak_accel = sqrtf(ax * ax + ay * ay + az * az);
+                float vib_sum = 0.0f;
+                uint16_t vib_count = 0;
+                float max_delta = 0.0f;
+                float prev_mag = peak_accel;
+                uint32_t burst_start = HAL_GetTick();
+
+                while ((HAL_GetTick() - burst_start) < 100) {
+                    IMUData_t burst;
+                    osMutexAcquire(imuMutex, osWaitForever);
+                    memcpy(&burst, (const void *)&g_imuData, sizeof(IMUData_t));
+                    osMutexRelease(imuMutex);
+                    if (burst.valid) {
+                        float mag = sqrtf(burst.accel_x * burst.accel_x +
+                                          burst.accel_y * burst.accel_y +
+                                          burst.accel_z * burst.accel_z);
+                        if (mag > peak_accel) peak_accel = mag;
+                        float delta = mag - prev_mag;
+                        vib_sum += delta * delta;
+                        vib_count++;
+                        if (fabsf(delta) > max_delta) max_delta = fabsf(delta);
+                        prev_mag = mag;
+                    }
+                    osDelay(2);
+                }
+
+                float vib_rms = (vib_count > 0) ? sqrtf(vib_sum / (float)vib_count) : 0.0f;
+                uint16_t dom_freq = (vib_count > 0) ? (uint16_t)(1000.0f / (2.0f * (100.0f / (float)vib_count))) : 0;
+
+                uint8_t payload[6];
+                int16_t pa = (int16_t)(peak_accel * 100.0f);
+                uint16_t vr = (uint16_t)(vib_rms * 1000.0f);
+                payload[0] = (uint8_t)(pa >> 8);
+                payload[1] = (uint8_t)(pa & 0xFF);
+                payload[2] = (uint8_t)(vr >> 8);
+                payload[3] = (uint8_t)(vr & 0xFF);
+                payload[4] = (uint8_t)(dom_freq >> 8);
+                payload[5] = (uint8_t)(dom_freq & 0xFF);
+                sendResponse(RSP_IMU_TAP_DATA, payload, 6);
+                break;
+            }
+
+            case CMD_REQUEST_MIC_TAP: {
+                triggerTapCapture();
+
+                uint32_t wait_start = HAL_GetTick();
+                while (!isCaptureComplete() && (HAL_GetTick() - wait_start) < 500) {
+                    osDelay(5);
+                }
+
+                if (!isCaptureComplete()) {
+                    sendError(ERR_SENSOR_FAULT);
+                    break;
+                }
+
+                uint16_t count = 0;
+                uint16_t *buf = getTapBuffer(&count);
+                if (buf == NULL || count == 0) {
+                    sendError(ERR_SENSOR_FAULT);
+                    break;
+                }
+
+                MicCapture_t local_mic;
+                memcpy(local_mic.samples, buf, count * sizeof(uint16_t));
+                local_mic.sample_count = count;
+                local_mic.sample_rate = MIC_SAMPLE_RATE_HZ;
+                local_mic.capture_complete = true;
+                computeBasicFFT(&local_mic);
+
+                uint8_t payload[6];
+                uint16_t freq = (uint16_t)local_mic.dominant_freq_hz;
+                uint16_t centroid = (uint16_t)local_mic.spectral_centroid_hz;
+                uint16_t decay = (uint16_t)(local_mic.decay_ratio * 1000.0f);
+                payload[0] = (uint8_t)(freq >> 8);
+                payload[1] = (uint8_t)(freq & 0xFF);
+                payload[2] = (uint8_t)(centroid >> 8);
+                payload[3] = (uint8_t)(centroid & 0xFF);
+                payload[4] = (uint8_t)(decay >> 8);
+                payload[5] = (uint8_t)(decay & 0xFF);
+                sendResponse(RSP_MIC_TAP_DATA, payload, 6);
                 break;
             }
 

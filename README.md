@@ -1,298 +1,185 @@
-# HYDRA GRASP
+# HYDRA GRASP v2.0
 
 **Haptic Yielding Detection with Real-time Adaptation**
 
-Multi-modal robotic grasp planning system built on the STEVAL-ROBKIT1. Fuses 10 sensing modalities across three networked microcontrollers to identify object material, geometry, and fragility before and during grasping. Classifies materials in real time using electrical impedance spectroscopy, acoustic tap analysis, and photometric stereo 3D scanning, then generates force-controlled grasp plans with continuous slip monitoring. Includes a live WiFi dashboard, BLE phone control, and an LED nervous system for transparent operation.
+Multi-physics pre-grasp material interrogation system built on the STEVAL-ROBKIT1. Classifies object material using impedance spectroscopy + acoustic tap analysis before grasping, then selects an optimal grasp strategy from a 4-strategy repertoire. Uses Dempster-Shafer evidence fusion, hyperdimensional computing for slip detection, and online learning for grasp success prediction.
 
----
+## What Makes This Different
+
+Most robotic grasping is blind — see object, grab, hope. HYDRA GRASP interrogates objects across multiple physics domains before committing to a grasp, like a human picking up something unfamiliar.
+
+| Feature | HYDRA GRASP | Typical Grasp Planner |
+|---------|-------------|----------------------|
+| Material identification | Impedance + acoustic + depth (pre-contact) | Vision only |
+| Classification method | Dempster-Shafer evidence fusion | Nearest-neighbor or CNN |
+| Slip detection | Hyperdimensional computing (0.375KB model) | Simple threshold |
+| Grasp strategy | 4-strategy repertoire selection | Single strategy |
+| Success prediction | Online logistic regression | None |
+| Hardware cost | ~INR 4,000 (excl. ROBKIT1) | INR 50,000+ (GPU + sensors) |
+| Compute | ESP32 + STM32 (no GPU) | GPU required |
 
 ## System Architecture
 
 ```
-  +------------------------------------------------------------------+
-  |                        WiFi Dashboard                             |
-  |                    (any device, port 80)                          |
-  +------------------------------+-----------------------------------+
-                                 | WebSocket (10 Hz)
-                                 |
-  +------------------------------+-----------------------------------+
-  |                       ESP32 DevKit v1                             |
-  |                     (Sensor Fusion Brain)                         |
-  |                                                                   |
-  |  Impedance    FSR x3     Piezo      ADS1115       Grasp          |
-  |  Spectroscopy (force)   (acoustic)  (IR x4)      Planner        |
-  |  [GPIO25/34/35] [36/39/32] [GPIO33] [I2C 21/22]  [12-state FSM] |
-  +--------+-------------------------------------------+-------------+
-           | UART 115200                                | UART 9600
-           | (commands + telemetry)                     | (LED commands)
-  +--------+-----------------------------+    +---------+-------------+
-  |  STEVAL-ROBKIT1 (STM32H725IGT6)     |    |  NodeMCU ESP8266      |
-  |  (Real-time Controller)             |    |  (LED Nervous System) |
-  |                                     |    |                       |
-  |  VL53L8CX 8x8 ToF  (depth grid)    |    |  WS2812B x20 strip   |
-  |  LSM6DSV16BX IMU    (orientation)   |    |  11 animation modes   |
-  |  Onboard microphone (tap FFT)       |    |  Material colors      |
-  |  STSPIN240 motors   (navigation)    |    |  Force heatmap        |
-  |  BLE module         (phone app)     |    |  State feedback       |
-  |  4ch servo PWM      (gripper)       |    |                       |
-  |  3D scanner         (photometric)   |    +-----------------------+
-  |  Safety watchdog    (E-stop)        |
-  |  8 FreeRTOS tasks   (CMSIS-OS2)     |
-  +-------------------------------------+
-           |               |
-  +--------+------+  +-----+--------+
-  | Servos (x3-4) |  | Motor Board  |
-  | Gripper + wrist|  | STM32G071   |
-  +---------------+  | (I2C 0x20)  |
-                     +--------------+
+  ┌───────────────────────────────────────────────────────┐
+  │                   Flutter App (Phone)                  │
+  │  DS Posterior · Force Bars · Depth Grid · Decision Log │
+  └──────────────────────┬────────────────────────────────┘
+                         │ WebSocket (10 Hz)
+  ┌──────────────────────┴────────────────────────────────┐
+  │                  ESP32 DevKit v1                        │
+  │                (Sensor Fusion Brain)                    │
+  │                                                        │
+  │  Impedance         FSR x3         Grasp Planner        │
+  │  Spectroscopy     (force/slip)    (4-strategy FSM)     │
+  │  [GPIO25/34/35]   [36/39/32]                           │
+  │                                                        │
+  │  DS Fusion    HD Slip Detection   Success Predictor    │
+  │  (Dempster-   (2048-bit binary    (online logistic     │
+  │   Shafer)      hypervectors)       regression + SPIFFS) │
+  └────────────┬───────────────────────────────────────────┘
+               │ UART 115200
+  ┌────────────┴───────────────────────────────────────────┐
+  │           STEVAL-ROBKIT1 (STM32H725IGT6)               │
+  │                                                        │
+  │  VL53L8CX 8x8 ToF    (depth + geometry estimation)    │
+  │  LSM6DSV16BX IMU      (orientation + tap vibration)    │
+  │  Onboard microphone   (acoustic tap FFT via CMSIS-DSP) │
+  │  STSPIN240 motors     (approach navigation)            │
+  │  BLE module           (phone app)                      │
+  │  4ch servo PWM        (gripper: 2 fingers + wrist)     │
+  │  Safety watchdog      (E-stop, force limits)           │
+  │  8 FreeRTOS tasks     (CMSIS-OS2)                      │
+  └────────────────────────────────────────────────────────┘
 ```
 
----
+## Novel Algorithms
 
-## Sensing Modalities
+### 1. Dempster-Shafer Evidence Fusion
+Each sensor produces a mass function over {Metal, Skin, Plastic, Wood, Glass, Cardboard}. Dempster's rule combines evidence from independent sources, handling inter-sensor conflict gracefully. Outputs belief (lower bound), plausibility (upper bound), and conflict factor per material.
 
-| # | Modality | Hardware | Description |
-|---|----------|----------|-------------|
-| 1 | **Impedance Spectroscopy** | ESP32 DAC + electrode pair | Software lock-in amplifier measures complex impedance |Z| + phase. Classifies metal, plastic, wood, glass, skin, cardboard |
-| 2 | **Acoustic Tap Analysis** | Piezo disc + CMSIS-DSP FFT | 1024-point FFT on STM32 Cortex-M7 FPU + ESP32 cross-validation. Dominant frequency, spectral centroid, decay ratio |
-| 3 | **Tri-point Force Sensing** | FSR402 x3 + ESP32 ADC1 | Center-of-pressure tracking with vibration-based slip detection (AC RMS on high-rate samples) |
-| 4 | **8x8 Depth Grid** | VL53L8CX ToF (on kit) | 64-zone time-of-flight grid for object centroid, size, and approach distance |
-| 5 | **Surface Curvature** | TCRT5000 x4 via ADS1115 | IR reflectance cross-array classifies flat, convex, concave, edge, cylinder geometries |
-| 6 | **6-axis IMU** | LSM6DSV16BX (on kit) | Accelerometer + gyroscope for pitch/roll/arm-tilt-compensated grasp orientation |
-| 7 | **Onboard Microphone** | ADC3 + BDMA + TIM6 (on kit) | 8kHz capture with threshold-triggered recording and 1024-pt arm_rfft_fast_f32 FFT |
-| 8 | **Motor Navigation** | STSPIN240 + encoders (on kit) | Inter-board I2C to motor board. Proportional drift correction, ToF-guided approach |
-| 9 | **BLE Control** | BLE module (on kit) | AT command interface, 10 remote commands, 500ms status push to phone |
-| 10 | **3D Photometric Stereo** | 3 IR LEDs + VL53L8CX signal_per_spad | Woodham's method surface normal reconstruction, 7 edge types, 12-position rotational sweep |
+### 2. Hyperdimensional Computing Slip Detection
+Binary hypervectors (D=2048 bits = 256 bytes) encode FSR force features. XOR binding + Hamming distance classification. Model size: 0.375KB. Auto-trains from RMS-based bootstrap during initial grasps.
 
----
+### 3. Grasp Strategy Repertoire
+Four strategies with distinct servo profiles and force curves:
+- **POWER**: High force, full close, robust objects (metal, wood)
+- **PRECISION**: Low force, fingertip only, fragile (glass, skin)
+- **WRAP**: Progressive close, curved objects (cylinders, bottles)
+- **EDGE**: Angled approach, thin/flat objects (cardboard, edges)
 
-## Hardware Requirements
+### 4. Online Grasp Success Predictor
+Logistic regression model predicting P(success) from 6 features. Updated via SGD after each grasp. Weights persist in SPIFFS. Gates grasp execution: low P(success) triggers repositioning.
 
-| Component | Qty | Purpose |
-|-----------|-----|---------|
-| STEVAL-ROBKIT1 (STM32H725IGT6) | 1 | Main controller with VL53L8CX, IMU, mic, motors, BLE onboard |
-| ESP32 DevKit v1 | 1 | Sensor fusion brain, impedance engine, WiFi dashboard |
-| NodeMCU ESP8266 | 1 | WS2812B LED strip controller |
-| FSR402 force-sensitive resistor | 3 | Finger force + slip detection |
-| Piezo disc (27mm) | 1 | Acoustic tap sensor |
-| TCRT5000 IR reflectance sensor | 4 | Surface curvature array |
-| ADS1115 16-bit ADC module | 1 | 4-channel IR sensor readout |
-| WS2812B LED strip | 20 LEDs | Status and material visualization |
-| SG90 / MG996R servo | 3-4 | Gripper fingers + wrist rotation |
-| IR LEDs (940nm) | 3 | Photometric stereo illumination |
-| Electrode pair (copper tape) | 1 pair | Impedance contact electrodes |
-| Passive components | assorted | Resistors, caps, diodes (see WIRING_GUIDE.md) |
-| 5V 3A power supply | 1 | ESP32 + NodeMCU + LEDs + sensors |
-| ROBKIT1 battery pack | 1 | STM32 + servos + motors |
+## Hardware BOM
 
----
-
-## Documentation
-
-| Document | Description |
-|----------|-------------|
-| [BUILD_GUIDE.md](docs/BUILD_GUIDE.md) | Step-by-step prototype construction: board setup, circuit building, 3D printing, assembly, flashing, testing, troubleshooting |
-| [WIRING_GUIDE.md](docs/WIRING_GUIDE.md) | Complete pin assignments, circuit schematics, power architecture |
-| [HYDRA_GRASP_BLUEPRINT.md](docs/HYDRA_GRASP_BLUEPRINT.md) | Full technical blueprint: sensing theory, algorithms, calibration, demo script, judge Q&A |
-
----
+| # | Component | Qty | Purpose |
+|---|-----------|-----|---------|
+| 1 | STEVAL-ROBKIT1 | 1 | Main controller (STM32H725 + ToF + IMU + mic + BLE + motors) |
+| 2 | ESP32 DevKit v1 | 1 | Sensor fusion brain |
+| 3 | ST-LINK V2 | 1 | Flashing STM32 via SWD |
+| 4 | FSR402 | 3 | Finger force + slip detection |
+| 5 | SG90 micro servo | 3 | Gripper (2) + wrist (1) |
+| 6 | Copper tape 5mm | 1 roll | Impedance electrodes |
+| 7 | Breadboard + jumper wires | 1 set | Sensor circuits |
+| 8 | 5V 3A USB supply | 1 | ESP32 power |
+| 9 | 7.4V LiPo / 4xAA | 1 | ROBKIT1 + servo power |
+| 10 | PLA filament | ~100g | 3D printed gripper |
+| 11 | E-stop button (NC) | 1 | Safety |
+| 12 | Passive components | -- | Resistors, caps, diodes for impedance circuit |
 
 ## Directory Structure
 
 ```
 StmGrasp/
-├── README.md
-├── docs/
-│   ├── BUILD_GUIDE.md            # Step-by-step prototype construction guide
-│   ├── WIRING_GUIDE.md           # Complete pin assignments and circuit diagrams
-│   └── HYDRA_GRASP_BLUEPRINT.md  # Technical blueprint, demo script, judge Q&A
-│
-├── esp32_brain/                  # ESP32 firmware (Arduino/PlatformIO)
-│   ├── config.h                  # Pin defs, material database, shared structs
-│   ├── impedance.h/.cpp          # Lock-in amplifier, material classifier
-│   ├── acoustic.h/.cpp           # Piezo FFT, cross-validation with impedance
-│   ├── sensors.h/.cpp            # ADS1115, TCRT5000 curvature, FSR, slip detect
-│   ├── grasp_planner.h/.cpp      # 12-state grasp FSM, quality scoring
-│   ├── comms.h/.cpp              # Binary UART protocol, depth grid unpacking
-│   ├── web_server.h/.cpp         # WiFi AP dashboard, WebSocket 10Hz push
-│   └── esp32_brain.ino           # Main loop, millis() scheduler
-│
-├── stm32_control/                # STM32H725 firmware (STM32CubeIDE / FreeRTOS)
-│   ├── main.h                    # All definitions, commands, structs, externs
-│   ├── main.c                    # HAL init, 8 FreeRTOS tasks, command dispatch
-│   ├── servo_control.h/.c        # TIM3 4ch PWM, trapezoidal profiles, PID force
-│   ├── depth_sensor.h/.c         # VL53L8CX 8x8 driver, DCI protocol, object profile
-│   ├── imu_sensor.h/.c           # LSM6DSV16BX 6-axis, pitch/roll/arm_tilt
-│   ├── mic_sensor.h/.c           # ADC3+BDMA+TIM6 8kHz capture, CMSIS-DSP FFT
-│   ├── motor_control.h/.c        # I2C to motor board, encoders, approach control
-│   ├── ble_comm.h/.c             # USART3 BLE, AT commands, phone notifications
-│   ├── scanner_3d.h/.c           # Photometric stereo, Woodham's method, edge detect
-│   ├── uart_protocol.h/.c        # Ring buffer RX, packet framing, telemetry TX
-│   └── safety.h/.c               # IWDG, E-STOP, force limits, heartbeat timeout
-│
-├── nodemcu_leds/                 # NodeMCU ESP8266 firmware (Arduino)
-│   └── nodemcu_leds.ino          # FastLED 20-LED, 11 animations, UART packet parser
-│
-└── 3d_parts/                     # 3D printable parts (OpenSCAD)
-    ├── gripper_finger.scad       # Parametric finger with sensor mount pockets
-    ├── gripper_base.scad         # U-frame with servo pockets and LED channel
-    ├── ir_led_ring.scad          # 40mm ring for 3 IR LEDs at 120 deg spacing
-    ├── sensor_backpack.scad      # ESP32 + NodeMCU + breadboard tray
-    ├── spring_contact_pad.scad   # Compliant fingertip with FSR pocket
-    └── assembly_preview.scad     # Full assembly visualization (color-coded)
+├── esp32_brain/           # ESP32 sensor fusion firmware (Arduino)
+│   ├── esp32_brain.ino    # Main loop + integration
+│   ├── config.h           # Pin assignments, structs, material DB
+│   ├── ds_fusion.*        # Dempster-Shafer evidence fusion
+│   ├── hd_slip.*          # Hyperdimensional slip detection
+│   ├── success_predictor.*# Online grasp success predictor
+│   ├── impedance.*        # Software lock-in amplifier
+│   ├── sensors.*          # FSR force + slip detection
+│   ├── grasp_planner.*    # 4-strategy FSM + repertoire
+│   ├── comms.*            # UART protocol to STM32
+│   └── web_server.*       # WiFi dashboard + WebSocket API
+├── stm32_control/         # STM32H725 FreeRTOS firmware
+│   ├── main.c/h           # 8 RTOS tasks, peripheral init
+│   ├── depth_sensor.*     # VL53L8CX 8x8 ToF
+│   ├── imu_sensor.*       # LSM6DSV16BX 6-axis IMU
+│   ├── mic_sensor.*       # Onboard mic + CMSIS-DSP FFT
+│   ├── servo_control.*    # 4-channel PWM servo driver
+│   ├── motor_control.*    # STSPIN240 motor + encoders
+│   ├── scanner_3d.*       # Photometric stereo 3D scanner
+│   ├── ble_comm.*         # BLE mobile app interface
+│   ├── uart_protocol.*    # UART protocol to ESP32
+│   └── safety.*           # Watchdog, E-stop, force limits
+├── hydra_app/             # Flutter companion app
+│   ├── pubspec.yaml
+│   └── lib/
+│       ├── main.dart
+│       ├── models/        # sensor_data.dart
+│       ├── services/      # websocket_service.dart
+│       └── widgets/       # dashboard, posterior, force, depth, log
+├── 3d_parts/              # OpenSCAD gripper parts (5 files)
+├── tools/                 # Training scripts
+│   └── train_classifier.py
+└── docs/                  # Build guide, wiring guide, blueprint
 ```
 
-**44 source files, 11,300+ lines of firmware and design code.**
+## Quick Start
 
----
+### Flash STM32
+1. Connect ST-LINK V2 flat ribbon to J1 header on ROBKIT1 main board
+2. Power ROBKIT1 with battery
+3. Open `stm32_control/` in STM32CubeIDE, target STM32H725IGT6
+4. Build (Ctrl+B) and flash (Run > Run)
 
-## Setup Instructions
+### Flash ESP32
+1. Open `esp32_brain/esp32_brain.ino` in Arduino IDE
+2. Board: ESP32 Dev Module, 240MHz, 4MB Flash
+3. Install libraries: ArduinoJson, ESPAsyncWebServer, AsyncTCP
+4. Upload
 
-### 1. Flash the ESP32 (Sensor Fusion Brain)
-
+### Run Flutter App
 ```bash
-# PlatformIO (recommended)
-cd esp32_brain
-pio run --target upload --upload-port COMx
-
-# Arduino IDE: Board = ESP32 Dev Module, Flash = 4MB, Partition = Default
-# Required libraries: WiFi, AsyncTCP, ESPAsyncWebServer, ArduinoJson, Wire, arduinoFFT
+cd hydra_app
+flutter create .
+flutter run
 ```
+Connect phone to "HydraGrasp" WiFi (password: hydra2026), app auto-connects.
 
-### 2. Flash the STM32 (STEVAL-ROBKIT1)
-
-Open `stm32_control/` as an STM32CubeIDE project. Build and flash via the onboard ST-LINK. Ensure the FPC cable to the imaging board (VL53L8CX) is properly seated. Required: CMSIS-DSP library (arm_math.h) for microphone FFT.
-
-### 3. Flash the NodeMCU (LED Controller)
-
+### Train ML Model (Optional)
 ```bash
-# Arduino IDE: Board = NodeMCU 1.0 (ESP-12E), Flash = 4MB
-# Required library: FastLED
+cd tools
+pip install scikit-learn numpy
+python train_classifier.py
 ```
 
-### 4. 3D Print Parts
+## Wiring
 
-Open each `.scad` file in OpenSCAD. Render (F6) and export as STL. Print with PLA at 0.2mm layer height, 20% infill. `assembly_preview.scad` shows the full assembly for reference. Print `gripper_finger.scad` twice (left and right, use `mirror_finger = true`).
+```
+ROBKIT1 PD5 (TX) ──→ ESP32 GPIO17 (RX)
+ROBKIT1 PD6 (RX) ←── ESP32 GPIO16 (TX)
+ROBKIT1 GND ──────── ESP32 GND
+ROBKIT1 PC6-PC8 ───→ Servo 1-3 signal
+ROBKIT1 PA0 ←─────── E-stop button
+Battery 5V ─────────→ Servo VCC rail
+Battery GND ────────→ Common GND bus
+ESP32 GPIO25 ───────→ Impedance DAC (via 1.5k + 100nF + 10k)
+ESP32 GPIO34/35 ←───── Impedance ADC (with 1N4148 clamps)
+ESP32 GPIO36/39/32 ←── FSR402 voltage dividers (10k pull-down)
+```
 
-### 5. Wiring
+## References
 
-Connect all three boards per `docs/WIRING_GUIDE.md`. Key points:
-
-- **Common GND** between all boards and all sensors
-- **UART**: ESP32 TX(GPIO16) -> STM32 RX(PD6), ESP32 RX(GPIO17) <- STM32 TX(PD5)
-- **LED UART**: ESP32 TX(GPIO5) -> NodeMCU RX
-- **I2C shared bus**: VL53L8CX + LSM6DSV16BX + motor board all on I2C1 (PB8/PB9), mutex-protected in firmware
-- All MCU pairs are 3.3V logic, no level shifters needed
-- Power servos from ROBKIT1 battery, never from USB
-- See WIRING_GUIDE.md for full schematic including impedance circuit, FSR dividers, and piezo input
-
-### 6. Power Up Sequence
-
-1. Connect 5V USB supply (ESP32, NodeMCU, sensors, LEDs)
-2. Connect ROBKIT1 battery (STM32, servos, motors)
-3. Verify: STM32 status LED steady, ESP32 serial output, NodeMCU blue breathing animation
-
----
-
-## WiFi Dashboard
-
-1. Power on ESP32. It creates AP: **SSID** `HydraGrasp`, **Password** `hydra2026`
-2. Connect and open `http://192.168.4.1`
-3. Dashboard streams at 10 Hz via WebSocket with 8 panels:
-   - Live 8x8 depth heatmap
-   - Impedance magnitude/phase with material classification
-   - Tri-point force gauge with slip indicator
-   - Acoustic FFT spectrum
-   - IR curvature geometry display
-   - Grasp state machine status
-   - Motor/encoder status
-   - LED color preview
-
----
-
-## BLE Phone Control
-
-When BLE is connected, the following commands are available from any BLE terminal app:
-
-| Command | Function |
-|---------|----------|
-| `SCAN` | Start 3D scan |
-| `GRIP` | Close gripper with auto force |
-| `RELEASE` | Open gripper |
-| `APPROACH <mm>` | Drive toward object to specified distance |
-| `STOP` | Emergency stop all motors |
-| `STATUS` | Request full system status |
-| `IMPEDANCE` | Trigger impedance measurement |
-| `TAP` | Trigger acoustic tap capture |
-| `FORCE <N>` | Set target grip force |
-| `SPEED <val>` | Set servo speed |
-
----
-
-## Demo Procedure
-
-### Pre-Demo Checklist
-
-1. Charge ROBKIT1 battery. Verify 5V USB supply rated for 3A+.
-2. Flash latest firmware on all three boards.
-3. Run impedance baseline calibration (electrodes open air).
-4. Verify WiFi dashboard accessible. Verify BLE pairing works.
-5. Prepare sample objects: metal can, plastic bottle, wooden block, glass jar, cardboard box.
-
-### Live Demo Steps
-
-1. **Power on.** Wait for NodeMCU blue breathing animation.
-2. **Connect** demo device to HydraGrasp WiFi. Open dashboard.
-3. **Present object** in front of gripper. 8x8 ToF detects and transitions IDLE -> DETECTED.
-4. **3D scan.** Robot rotates around object using motors. IR LEDs illuminate from 3 angles. Photometric stereo reconstructs surface normals. Dashboard shows edge classification (smooth, ridge, corner, etc.).
-5. **Touch electrodes** to object. Impedance runs automatically. Dashboard shows |Z|, phase, material classification with confidence. LEDs change to material color.
-6. **Tap object** with piezo finger. STM32 captures audio, runs CMSIS-DSP FFT, sends spectral features to ESP32. Cross-validated with impedance (0.7/0.3 weighting).
-7. **IMU compensation.** Tilt the gripper arm. Dashboard shows real-time pitch/roll/arm_tilt. Grasp planner adjusts force targets for gravity.
-8. **Grasp planning.** System selects force, speed, slip threshold based on material. Quality score shown on dashboard.
-9. **Motor approach.** Robot drives toward object using VL53L8CX center zones. Proportional drift correction keeps it centered. Stops at target distance.
-10. **Grip.** Gripper closes with force-ramped PID control. Real-time force bars show FSR readings. Slip detection active with auto force increase.
-11. **Hold.** Tilt or tug object. Slip response visible on dashboard. IR curvature shows surface geometry under fingers.
-12. **Release.** Command from dashboard, BLE, or timeout. Gripper opens smoothly. LEDs return to idle.
-
-### Quick Reset
-
-Press E-stop on ROBKIT1 header. All servos release immediately. Power cycle to restart.
-
----
-
-## Key Technical Details
-
-- **FreeRTOS**: 8 tasks with priority inversion protection (recursive mutexes with priority inheritance)
-- **I2C bus sharing**: VL53L8CX, LSM6DSV16BX IMU, and motor board (STM32G071 @ 0x20) share I2C1, protected by depthMutex
-- **UART protocol**: Binary packets [0xAA][CMD][LEN][DATA...][XOR_CHECKSUM] with 256-byte ring buffer
-- **LED protocol**: [0xBB][CMD][P1][P2][P3] at 9600 baud to NodeMCU
-- **Safety**: Independent watchdog (2s timeout), E-stop GPIO monitoring, force limits, heartbeat timeout (3s -> open gripper)
-- **ADC2/WiFi conflict**: All ESP32 ADC readings on ADC1 pins (GPIO32-39) to avoid ADC2+WiFi conflict
-- **DMA buffer placement**: Microphone DMA buffer in `.sram4` section for STM32H725 BDMA/ADC3 domain compatibility
-- **Photometric stereo**: Uses VL53L8CX `signal_per_spad` as brightness proxy (avoids complex camera driver)
-
----
+- Dempster-Shafer: Shafer, G. (1976). A Mathematical Theory of Evidence
+- HD Computing: Neubert et al., "HD Computing for Tactile Sensing" (2024)
+- Pre-Grasp Sensing: Hanson et al., arxiv:2207.00942 (2022)
+- SLURP: Ramkumar et al., RIVeR Lab, Northeastern
+- Knocker: Laput et al., ACM UIST (2019)
+- emlearn: Nordby, J., github.com/emlearn/emlearn
 
 ## License
 
-MIT License
-
-Copyright (c) 2026
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+MIT

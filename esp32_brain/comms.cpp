@@ -114,7 +114,7 @@ static void _handlePacket(uint8_t cmd, const uint8_t* data, uint8_t len) {
             break;
         }
 
-        case RSP_IMU_TAP_DATA:
+        case 0x92: // RSP_IMU_TAP_DATA
             if (len >= 6) {
                 _imu_tap.peak_accel = (float)(((int16_t)data[0]<<8)|data[1]) / 100.0f;
                 _imu_tap.vibration_rms = (float)(((uint16_t)data[2]<<8)|data[3]) / 1000.0f;
@@ -124,7 +124,7 @@ static void _handlePacket(uint8_t cmd, const uint8_t* data, uint8_t len) {
             }
             break;
 
-        case RSP_MIC_TAP_DATA:
+        case 0x93: // RSP_MIC_TAP_DATA
             if (len >= 6) {
                 _mic_tap.dominant_freq = (float)(((uint16_t)data[0]<<8)|data[1]);
                 _mic_tap.spectral_centroid = (float)(((uint16_t)data[2]<<8)|data[3]);

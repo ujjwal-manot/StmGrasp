@@ -136,6 +136,8 @@ extern "C" {
 #define CMD_START_QUICK_SCAN      0x21U  /* Single-position quick scan (no rotation) */
 #define CMD_GET_SCAN_STATUS       0x22U  /* Query scanner state and progress */
 #define CMD_GET_SCAN_RESULT       0x23U  /* Request completed scan result */
+#define CMD_REQUEST_IMU_TAP       0x24U
+#define CMD_REQUEST_MIC_TAP       0x25U
 
 /* Response IDs (STM32 -> ESP32) */
 #define RSP_ACK                   0x80U
@@ -150,6 +152,8 @@ extern "C" {
 #define RSP_ENCODER_DATA          0x89U  /* Encoder data: [left_enc(4)][right_enc(4)][distance(4)] */
 #define RSP_SCAN_STATUS           0x90U  /* Scanner state + progress */
 #define RSP_SCAN_RESULT           0x91U  /* 3D scan result (points, bbox, edges) */
+#define RSP_IMU_TAP_DATA          0x92U
+#define RSP_MIC_TAP_DATA          0x93U
 
 /* Error codes */
 #define ERR_NONE                  0x00U

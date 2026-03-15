@@ -107,16 +107,16 @@
 #define CMD_SERVO_MOVE            0x05
 #define CMD_ESTOP                 0x06
 #define CMD_REQUEST_DEPTH         0x07
-#define CMD_REQUEST_IMU_TAP       0x08  // Request IMU vibration data during tap
-#define CMD_REQUEST_MIC_TAP       0x09  // Trigger onboard mic capture for tap
+#define CMD_REQUEST_IMU_TAP       0x24
+#define CMD_REQUEST_MIC_TAP       0x25
 
 // STM32 response IDs
 #define RSP_POSITION              0x81
 #define RSP_DEPTH_GRID            0x82
 #define RSP_STATUS                0x83
 #define RSP_ERROR                 0x84
-#define RSP_IMU_TAP_DATA          0x85  // IMU acceleration burst during tap
-#define RSP_MIC_TAP_DATA          0x86  // Mic FFT results from onboard mic
+#define RSP_IMU_TAP_DATA          0x92
+#define RSP_MIC_TAP_DATA          0x93
 
 // ─────────────────────────────────────────────────────────────
 // WiFi / Web
