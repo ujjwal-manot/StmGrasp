@@ -154,42 +154,8 @@ ImpedanceResult measureImpedance() {
         return result;
     }
 
-    result.material_idx = classifyMaterial(result.magnitude, result.phase_deg, &result.confidence);
+    // Classification now handled by DS fusion (ds_fusion.cpp)
+    result.material_idx = MAT_UNKNOWN;
     result.valid = true;
     return result;
-}
-
-
-uint8_t classifyMaterial(float magnitude, float phase_deg, float* out_confidence) {
-    // Nearest-neighbor in normalized (log10|Z|, phase/90) space
-    float log_mag = log10f(fmaxf(magnitude, 0.01f));
-    float norm_phase = phase_deg / 90.0f;
-
-    float best_dist = 1e9f;
-    uint8_t best_idx = MAT_UNKNOWN;
-
-    for (int i = 0; i < MATERIAL_COUNT; i++) {
-        float ref_log = log10f(fmaxf(MATERIAL_DB[i].impedance_magnitude, 0.01f));
-        float ref_phase = MATERIAL_DB[i].impedance_phase_deg / 90.0f;
-
-        float d_log = log_mag - ref_log;
-        float d_phase = norm_phase - ref_phase;
-        float dist = sqrtf(d_log * d_log + d_phase * d_phase);
-
-        if (dist < best_dist) {
-            best_dist = dist;
-            best_idx = (uint8_t)i;
-        }
-    }
-
-    if (best_dist > IMP_CLASSIFY_THRESHOLD) {
-        best_idx = MAT_UNKNOWN;
-        if (out_confidence) *out_confidence *= 0.3f;
-    } else {
-        // Confidence scales inversely with distance
-        float dist_conf = 1.0f - (best_dist / IMP_CLASSIFY_THRESHOLD);
-        if (out_confidence) *out_confidence *= dist_conf;
-    }
-
-    return best_idx;
 }

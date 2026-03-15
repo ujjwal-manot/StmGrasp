@@ -17,10 +17,7 @@
 #define PIN_FSR2            39   // ADC1_CH3 / VN
 #define PIN_FSR3            32   // ADC1_CH4
 
-// Acoustic tap piezo
-#define PIN_PIEZO_ADC       33   // ADC1_CH5
-
-// I2C bus (ADS1115 for TCRT5000 IR array)
+// I2C bus (reserved, TCRT5000/ADS1115 removed from BOM)
 #define PIN_SDA             21
 #define PIN_SCL             22
 
@@ -28,11 +25,10 @@
 #define PIN_UART_STM32_TX   16   // TX2
 #define PIN_UART_STM32_RX   17   // RX2
 
-// UART to NodeMCU (LED strip controller)
-#define PIN_UART_LED_TX     5
-
-// Spare / user button
-#define PIN_SPARE_BTN       4
+// User buttons
+#define PIN_BTN_CALIBRATE   33   // Calibrate / start (was piezo, now freed)
+#define PIN_BTN_START        5   // Manual start (was NodeMCU TX, now freed)
+#define PIN_SPARE_BTN        4
 
 // ─────────────────────────────────────────────────────────────
 // System Timing (milliseconds unless noted)
@@ -98,9 +94,7 @@
 // UART Protocol
 // ─────────────────────────────────────────────────────────────
 #define UART_STM32_BAUD         115200
-#define UART_LED_BAUD             9600
 #define UART_SYNC_BYTE_STM32      0xAA
-#define UART_SYNC_BYTE_LED        0xBB
 #define UART_MAX_PAYLOAD            72    // 64 depth + overhead
 #define UART_RX_RING_SIZE          256
 #define UART_TIMEOUT_MS             50
@@ -113,20 +107,16 @@
 #define CMD_SERVO_MOVE            0x05
 #define CMD_ESTOP                 0x06
 #define CMD_REQUEST_DEPTH         0x07
+#define CMD_REQUEST_IMU_TAP       0x08  // Request IMU vibration data during tap
+#define CMD_REQUEST_MIC_TAP       0x09  // Trigger onboard mic capture for tap
 
 // STM32 response IDs
 #define RSP_POSITION              0x81
 #define RSP_DEPTH_GRID            0x82
 #define RSP_STATUS                0x83
 #define RSP_ERROR                 0x84
-
-// LED command IDs
-#define LED_SOLID                 0x01
-#define LED_ANIMATE               0x02
-#define LED_PIXEL                 0x03
-#define LED_MATERIAL              0x04
-#define LED_HEARTBEAT             0x05
-#define LED_FORCE_MAP             0x06
+#define RSP_IMU_TAP_DATA          0x85  // IMU acceleration burst during tap
+#define RSP_MIC_TAP_DATA          0x86  // Mic FFT results from onboard mic
 
 // ─────────────────────────────────────────────────────────────
 // WiFi / Web
@@ -245,6 +235,21 @@ struct DepthGrid {
     bool valid;
 };
 
+// ─────────────────────────────────────────────────────────────
+// Grasp Strategy Repertoire
+// ─────────────────────────────────────────────────────────────
+enum GraspStrategy : uint8_t {
+    STRATEGY_POWER     = 0,  // High force, full close, robust objects
+    STRATEGY_PRECISION = 1,  // Low force, fingertip only, fragile/small
+    STRATEGY_WRAP      = 2,  // Progressive close, curved objects
+    STRATEGY_EDGE      = 3,  // Angled approach, thin/flat objects
+    STRATEGY_COUNT     = 4
+};
+
+static const char* STRATEGY_NAMES[] = {
+    "POWER", "PRECISION", "WRAP", "EDGE"
+};
+
 struct GraspPlan {
     float target_force_N;
     float approach_speed;    // 0-1 normalized
@@ -252,6 +257,8 @@ struct GraspPlan {
     float force_ramp_Nps;    // N per second
     float slip_threshold;
     float quality_score;     // 0-1
+    GraspStrategy strategy;  // selected grasp strategy
+    float success_prob;      // predicted P(success) from success predictor
     bool valid;
 };
 

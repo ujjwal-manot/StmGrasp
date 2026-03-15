@@ -2,6 +2,7 @@
 #define WEB_SERVER_H
 
 #include "config.h"
+#include "ds_fusion.h"
 
 void setupWiFiAP();
 void setupWebServer();
@@ -13,12 +14,10 @@ void pushSensorData(const ImpedanceResult& imp,
                     const GraspPlan& plan,
                     GraspState state,
                     float grasp_quality,
-                    uint8_t fused_material,
-                    float fused_confidence);
+                    const DSResult& ds);
 void cleanupWebClients();
 
-// Callback type for dashboard commands
 typedef void (*WebCommandCallback)(const char* command);
 void setWebCommandCallback(WebCommandCallback cb);
 
-#endif // WEB_SERVER_H
+#endif
