@@ -181,8 +181,9 @@ extern "C" {
 /* ========================================================================== */
 
 /* UART packet structure:
- * [0xAA] [LEN] [CMD/RSP] [PAYLOAD...] [XOR_CHECKSUM]
- * LEN = number of bytes after LEN (cmd + payload + checksum)
+ * [0xAA] [CMD/RSP] [LEN] [PAYLOAD...] [XOR_CHECKSUM]
+ * LEN = number of payload bytes only.
+ * XOR_CHECKSUM = CMD ^ LEN ^ PAYLOAD[0] ^ ... ^ PAYLOAD[n-1]
  */
 typedef struct {
     uint8_t header;

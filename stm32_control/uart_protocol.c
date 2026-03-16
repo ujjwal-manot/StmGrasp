@@ -2,9 +2,9 @@
  * UART Protocol Implementation
  * Interrupt-driven UART with ring buffer, packet framing, XOR checksum.
  *
- * Packet format: [0xAA] [LEN] [CMD/RSP] [PAYLOAD...] [XOR_CHECKSUM]
- * LEN = count of bytes following LEN itself (cmd + payload + checksum).
- * XOR_CHECKSUM = XOR of all bytes from LEN through end of payload.
+ * Packet format: [0xAA] [CMD] [LEN] [PAYLOAD...] [XOR_CHECKSUM]
+ * LEN = number of payload bytes only (excludes CMD and checksum).
+ * XOR_CHECKSUM = CMD ^ LEN ^ PAYLOAD[0] ^ ... ^ PAYLOAD[n-1].
  */
 
 #include "uart_protocol.h"
@@ -12,9 +12,11 @@
 
 static RingBuffer_t  s_rxRing;
 static ParseState_t  s_parseState;
+static uint8_t       s_parseCmd;
 static uint8_t       s_parseLen;
-static uint8_t       s_parseBuf[UART_MAX_PAYLOAD + 4];
+static uint8_t       s_parseBuf[UART_MAX_PAYLOAD];
 static uint8_t       s_parseIdx;
+static uint8_t       s_parseXor;
 static uint8_t       s_rxByte;  /* Single-byte DMA/IT target */
 
 /* -------------------------------------------------------------------------- */
@@ -76,7 +78,10 @@ void initUART(void)
 {
     ringBufReset(&s_rxRing);
     s_parseState = PARSE_WAIT_HEADER;
+    s_parseCmd   = 0;
+    s_parseLen   = 0;
     s_parseIdx   = 0;
+    s_parseXor   = 0;
 
     /* Start interrupt-driven single-byte reception */
     HAL_UART_Receive_IT(&huart2, &s_rxByte, 1);
@@ -119,55 +124,55 @@ bool parseCommand(UartPacket_t *pkt)
 
         case PARSE_WAIT_HEADER:
             if (byte == UART_PACKET_HEADER) {
-                s_parseState = PARSE_WAIT_LENGTH;
+                s_parseXor = 0;
+                s_parseState = PARSE_WAIT_CMD;
             }
             break;
 
+        case PARSE_WAIT_CMD:
+            s_parseCmd = byte;
+            s_parseXor ^= byte;
+            s_parseState = PARSE_WAIT_LENGTH;
+            break;
+
         case PARSE_WAIT_LENGTH:
-            if (byte < 2 || byte > (UART_MAX_PAYLOAD + 2)) {
+            s_parseLen = byte;
+            s_parseXor ^= byte;
+            s_parseIdx = 0;
+            if (s_parseLen == 0) {
+                s_parseState = PARSE_WAIT_CHECKSUM;
+            } else if (s_parseLen > UART_MAX_PAYLOAD) {
                 /* Invalid length, reset */
                 s_parseState = PARSE_WAIT_HEADER;
             } else {
-                s_parseLen   = byte;
-                s_parseIdx   = 0;
-                s_parseBuf[0] = byte; /* Store LEN for checksum calc */
                 s_parseState = PARSE_WAIT_DATA;
             }
             break;
 
         case PARSE_WAIT_DATA:
-            s_parseBuf[1 + s_parseIdx] = byte;
-            s_parseIdx++;
-
+            s_parseBuf[s_parseIdx++] = byte;
+            s_parseXor ^= byte;
             if (s_parseIdx >= s_parseLen) {
-                /* Complete packet received:
-                 * s_parseBuf[0]   = LEN
-                 * s_parseBuf[1]   = CMD
-                 * s_parseBuf[2..] = PAYLOAD
-                 * s_parseBuf[s_parseLen] = CHECKSUM (last byte of the LEN-counted data)
-                 */
-                uint8_t payload_count = s_parseLen - 2; /* Exclude CMD and CHECKSUM */
-                uint8_t received_cksum = s_parseBuf[s_parseLen]; /* Last byte */
+                s_parseState = PARSE_WAIT_CHECKSUM;
+            }
+            break;
 
-                /* Compute checksum over LEN + CMD + PAYLOAD (everything except the checksum itself) */
-                uint8_t calc_cksum = computeXorChecksum(s_parseBuf, s_parseLen); /* LEN through last payload byte */
-
-                if (calc_cksum == received_cksum) {
-                    pkt->header      = UART_PACKET_HEADER;
-                    pkt->length      = s_parseLen;
-                    pkt->cmd         = s_parseBuf[1];
-                    pkt->payload_len = payload_count;
-                    if (payload_count > 0) {
-                        memcpy(pkt->payload, &s_parseBuf[2], payload_count);
-                    }
-                    pkt->checksum = received_cksum;
-                    s_parseState  = PARSE_WAIT_HEADER;
-                    return true;
-                } else {
-                    /* Checksum mismatch */
-                    sendError(ERR_CHECKSUM_FAIL);
-                    s_parseState = PARSE_WAIT_HEADER;
+        case PARSE_WAIT_CHECKSUM:
+            if (byte == s_parseXor) {
+                pkt->header      = UART_PACKET_HEADER;
+                pkt->length      = s_parseLen;
+                pkt->cmd         = s_parseCmd;
+                pkt->payload_len = s_parseLen;
+                if (s_parseLen > 0) {
+                    memcpy(pkt->payload, s_parseBuf, s_parseLen);
                 }
+                pkt->checksum = byte;
+                s_parseState  = PARSE_WAIT_HEADER;
+                return true;
+            } else {
+                /* Checksum mismatch */
+                sendError(ERR_CHECKSUM_FAIL);
+                s_parseState = PARSE_WAIT_HEADER;
             }
             break;
         }
@@ -183,25 +188,29 @@ bool parseCommand(UartPacket_t *pkt)
 void sendResponse(uint8_t rsp_id, const uint8_t *payload, uint8_t len)
 {
     uint8_t txbuf[UART_TX_BUF_SIZE];
-    uint8_t total_len = len + 2; /* CMD + payload + checksum */
 
-    if (total_len > (UART_TX_BUF_SIZE - 2)) {
+    if ((len + 4) > UART_TX_BUF_SIZE) {
         return; /* Packet too large */
     }
 
+    /* Format: [0xAA] [CMD] [LEN] [PAYLOAD...] [XOR_CHECKSUM]
+     * LEN = payload byte count only.
+     * XOR_CHECKSUM = CMD ^ LEN ^ PAYLOAD[0] ^ ... ^ PAYLOAD[n-1] */
     txbuf[0] = UART_PACKET_HEADER;
-    txbuf[1] = total_len; /* LEN */
-    txbuf[2] = rsp_id;
+    txbuf[1] = rsp_id;
+    txbuf[2] = len;
 
     if (len > 0 && payload != NULL) {
         memcpy(&txbuf[3], payload, len);
     }
 
-    /* XOR checksum: covers LEN + CMD + PAYLOAD */
-    uint8_t cksum = computeXorChecksum(&txbuf[1], 1 + 1 + len); /* LEN + RSP + payload */
+    uint8_t cksum = rsp_id ^ len;
+    for (uint8_t i = 0; i < len; i++) {
+        cksum ^= payload[i];
+    }
     txbuf[3 + len] = cksum;
 
-    uint8_t frame_len = 4 + len; /* HEADER + LEN + CMD + PAYLOAD + CHECKSUM */
+    uint8_t frame_len = 4 + len; /* HEADER + CMD + LEN + PAYLOAD + CHECKSUM */
     HAL_UART_Transmit(&huart2, txbuf, frame_len, 50);
 }
 

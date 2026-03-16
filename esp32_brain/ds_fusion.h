@@ -59,6 +59,7 @@ typedef struct {
 typedef struct {
     DSFocalElement elements[DS_MAX_FOCAL];
     uint8_t count;
+    float conflict;  // K: accumulated inter-source conflict from dsCombine (0 = no conflict)
 } DSMassFunction;
 
 // Final fusion result with belief and plausibility for each material

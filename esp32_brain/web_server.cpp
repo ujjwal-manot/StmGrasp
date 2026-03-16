@@ -138,9 +138,11 @@ function render(){
  document.getElementById('conflict').textContent=Math.round((D.conflict||0)*100)+'%';
  document.getElementById('ignorance').textContent=Math.round((D.ignorance||1)*100)+'%';
 
- // Decision log
+ // Decision log (use textContent to prevent XSS)
  if(D.log&&D.log.length>0){
-  document.getElementById('decLog').innerHTML=D.log.map(function(l){return'<div>'+l+'</div>';}).join('');
+  var dl=document.getElementById('decLog');
+  dl.textContent='';
+  D.log.forEach(function(l){var d=document.createElement('div');d.textContent=l;dl.appendChild(d);});
  }
 
  drawImpedance();drawForce();drawDepth();

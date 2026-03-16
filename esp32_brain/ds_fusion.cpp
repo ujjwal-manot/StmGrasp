@@ -324,6 +324,9 @@ DSMassFunction dsCombine(const DSMassFunction* m1, const DSMassFunction* m2) {
         }
     }
 
+    // Store the raw conflict K before normalization
+    result.conflict = conflict;
+
     // Normalize by (1 - K) where K is the conflict
     float norm = 1.0f - conflict;
     if (norm < 0.001f) {
@@ -332,6 +335,7 @@ DSMassFunction dsCombine(const DSMassFunction* m1, const DSMassFunction* m2) {
         result.elements[0].subset = DS_THETA;
         result.elements[0].mass = 1.0f;
         result.count = 1;
+        result.conflict = conflict;
         return result;
     }
 
@@ -409,12 +413,8 @@ DSResult dsGetResult(const DSMassFunction* combined) {
         }
     }
 
-    // Compute conflict from the combination (approximate: 1 - sum of all masses before norm)
-    float mass_sum = 0.0f;
-    for (int i = 0; i < combined->count; i++) {
-        mass_sum += combined->elements[i].mass;
-    }
-    result.conflict = fmaxf(0.0f, 1.0f - mass_sum);
+    // Use the actual conflict K that was computed during Dempster's combination
+    result.conflict = combined->conflict;
 
     // Find best material by belief
     float best_bel = 0.0f;
@@ -431,11 +431,12 @@ DSResult dsGetResult(const DSMassFunction* combined) {
     result.best_plausibility = (best_idx < MATERIAL_COUNT) ?
                                 result.plausibility[best_idx] : 0.0f;
 
-    _logAdd("FUSED: %s Bel=%.0f%% Pl=%.0f%% ign=%.0f%%",
+    _logAdd("FUSED: %s Bel=%.0f%% Pl=%.0f%% ign=%.0f%% K=%.0f%%",
             (best_idx < MATERIAL_COUNT) ? MATERIAL_DB[best_idx].name : "Unknown",
             best_bel * 100.0f,
             result.best_plausibility * 100.0f,
-            result.mass_theta * 100.0f);
+            result.mass_theta * 100.0f,
+            result.conflict * 100.0f);
 
     result.valid = (best_idx < MATERIAL_COUNT && best_bel > 0.1f);
     return result;

@@ -19,11 +19,13 @@ typedef struct {
     volatile uint16_t tail;
 } RingBuffer_t;
 
-/* Parser state machine */
+/* Parser state machine (matches ESP32 format: [0xAA][CMD][LEN][DATA][CHECKSUM]) */
 typedef enum {
     PARSE_WAIT_HEADER,
+    PARSE_WAIT_CMD,
     PARSE_WAIT_LENGTH,
     PARSE_WAIT_DATA,
+    PARSE_WAIT_CHECKSUM,
 } ParseState_t;
 
 void     initUART(void);
